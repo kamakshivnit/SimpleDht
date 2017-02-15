@@ -1,0 +1,624 @@
+package edu.buffalo.cse.cse486586.simpledht;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Formatter;
+import java.util.logging.SocketHandler;
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.content.Context;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.AsyncTask;
+import android.speech.tts.TextToSpeech;
+import android.telephony.TelephonyManager;
+import android.database.sqlite.SQLiteDatabase;
+import android.util.Log;
+import java.net.Socket;
+
+public class SimpleDhtProvider extends ContentProvider {
+    private static final int SERVER_PORT=10000;
+    private static Uri mUri;
+    private static final String KEY_FIELD = "key";
+    private static final String VALUE_FIELD = "value";
+    private static final String TAG= SimpleDhtProvider.class.getSimpleName();
+    private static int myPort=0;
+    private static String portStr="";
+    private static int successorPort=-1;
+    private static int predecesssorPort=-1;
+    private static String NodeId="";
+    private static String successorId="";
+    private static String predecesssorId="";
+    private static int[] REMOTE_PORTS ={11108, 11112, 11116, 11120, 11124};
+    private DBHelper dbHelper;
+    private SQLiteDatabase db;
+
+    @Override
+    public int delete(Uri uri, String selection, String[] selectionArgs) {
+        // TODO Auto-generated method stub
+        dbHelper.deleteMessage(selection);
+        // TODO Auto-generated method stub
+        if ( (selection.equals("*"))||(selection.equals("@")) )
+        {
+            int succ=dbHelper.deleteAllMessage();
+            Log.v(TAG,"Deleting all messages success:"+ succ);
+        }
+        String message= "delete"+"_"+selection;
+        if ( ((selection.compareTo(NodeId)<= 0) && (selection.compareTo(predecesssorId)>0)) ||
+                ((NodeId.compareTo(predecesssorId)< 0) &&  ( (selection.compareTo(predecesssorId)>0)||(selection.compareTo(NodeId)>0) ) ) )
+        {
+
+            int succ=dbHelper.deleteMessage(selection);
+            Log.v(TAG,"Deleting success:"+ succ);
+
+        }
+        else
+        {
+            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,message,"delete");
+
+        }
+        return 0;
+
+
+    }
+
+    @Override
+    public String getType(Uri uri) {
+        // TODO Auto-generated method stub
+        return null;
+    }
+
+    @Override
+    public Uri insert(Uri uri, ContentValues values) {
+        // TODO Auto-generated method stub
+        //write a function that does chord ring protocol and call it from here. This function will return success
+        //after key value pair is successfully inserted.Means this function should wait till it gets Ack?
+        Log.v(TAG,"Entered insert()");
+        Log.v(TAG,"key:"+values.get("key").toString());
+        Log.v(TAG,"NodeId:"+NodeId);
+        Log.v(TAG,"PredecessorId:"+predecesssorId);
+        Log.v(TAG,values.get("value").toString());
+        String message= "insert"+"_"+values.get("key").toString()+"_"+values.get("value").toString();
+        String key=values.get("key").toString();
+        Log.v(TAG,"Chceking conditions");
+        if (predecesssorPort==-1)
+        {
+            Log.v(TAG,"Condition1");
+        }
+        if ((key.compareTo(NodeId)<= 0) && (key.compareTo(predecesssorId)>0))
+        {
+            Log.v(TAG,"Condition2");
+        }
+        if ((NodeId.compareTo(predecesssorId)< 0) &&  ( (key.compareTo(predecesssorId)>0)||(key.compareTo(NodeId)>0) ) )
+        {
+            Log.v(TAG,"Condition3");
+        }
+        if ( (predecesssorPort==-1)||((key.compareTo(NodeId)<= 0) && (key.compareTo(predecesssorId)>0)) ||
+                    ((NodeId.compareTo(predecesssorId)< 0) &&  ( (key.compareTo(predecesssorId)>0)||(key.compareTo(NodeId)>0) ) ) )
+        {
+            boolean success=false;
+            success=dbHelper.insertkey(values);
+            Log.v(TAG,"Inserting success"+ success);
+
+        }
+        else
+        {
+            Log.v(TAG,"starting new client task");
+            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,message,"insert");
+
+        }
+        return uri;
+        /*boolean success=false;
+        success=dbHelper.insertkey(values);
+        Log.v(TAG,"Inserting success"+ success);
+        return uri;*/
+
+    }
+
+
+
+    @Override
+    public boolean onCreate() {
+        // TODO Auto-generated method stub
+        Log.v(TAG,"Entered OnCreate()");
+
+        dbHelper = new DBHelper(this.getContext());
+        db= dbHelper.getWritableDatabase();
+
+        //Getting port of avd
+        TelephonyManager tel = (TelephonyManager) this.getContext().getSystemService(Context.TELEPHONY_SERVICE);
+        portStr = tel.getLine1Number().substring(tel.getLine1Number().length() - 4);
+        myPort = (Integer.parseInt(portStr) * 2);
+
+        mUri = buildUri("content", "edu.buffalo.cse.cse486586.simpledht.provider");
+        //Get NodeId of this node
+        try {
+            NodeId=genHash(portStr);
+        }catch (Exception e) {
+            Log.e(TAG,e.toString());
+        }
+
+
+        //create a server socket that keeps listening
+        try {
+            /*
+             * Create a server socket as well as a thread (AsyncTask) that listens on the server
+             * port.
+             *
+             */
+            ServerSocket serverSocket = new ServerSocket(SERVER_PORT);
+            new ServerTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, serverSocket);
+        } catch (IOException e) {
+            Log.e(TAG, "Can't create a ServerSocket" + e);
+            //return;
+        }
+        NodeJoinRequest();
+        return false;
+    }
+
+    @Override
+    public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs,
+            String sortOrder) {
+        // TODO Auto-generated method stub
+        //Write a function that checks if it is present in own files if not forwards it to the successor.
+        Cursor res= null;
+        Log.v(TAG,"Entering query()");
+        Log.v(TAG,"selection:"+selection);
+        if (selection.equals("@"))
+        {
+            Log.v(TAG,"@");
+            res=dbHelper.getAllMessages();
+        }
+        else if (selection.equals("*"))
+        {
+            Log.v(TAG,"*");
+            res=dbHelper.getAllMessages();
+        }
+        else
+        {
+            Log.v(TAG,"not @");
+            res=dbHelper.getMessage(selection);
+        }
+
+        return res;
+    }
+
+    @Override
+    public int update(Uri uri, ContentValues values, String selection, String[] selectionArgs) {
+        // TODO Auto-generated method stub
+        return 0;
+    }
+
+    private String genHash(String input) throws NoSuchAlgorithmException {
+        MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
+        byte[] sha1Hash = sha1.digest(input.getBytes());
+        Formatter formatter = new Formatter();
+        for (byte b : sha1Hash) {
+            formatter.format("%02x", b);
+        }
+        return formatter.toString();
+    }
+
+    private class ServerTask extends AsyncTask<ServerSocket, String, Void> {
+
+        @Override
+        protected Void doInBackground(ServerSocket... sockets) {
+            ServerSocket serverSocket = sockets[0];
+            while (true) {
+                try {
+                    //only for ping request type
+                    Log.v(TAG, "Entered servertask");
+                    Socket socket = serverSocket.accept();
+                    BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                    PrintWriter out=new PrintWriter(socket.getOutputStream(),true);
+                    String input=in.readLine();
+                    Log.v(TAG, input);
+                    String[] inputvalues=input.split("_");
+                    Log.v(TAG, inputvalues[0]);
+                    if (inputvalues[0].equals("ping")){
+                        String output=NodeJoinHandler(true,input,out);
+                        out.println(output);
+                    }//for chord protocol of ping
+                    else if (inputvalues[0].equals("nodejoin")){
+                        String output=NodeJoinHandler(false,input,out);
+                        out.println(output);
+                    }//for chord protocol of insert
+                    else if (inputvalues[0].equals("insert")){
+                        Log.v(TAG, "ServerTask Insert:"+inputvalues[1]+inputvalues[2]);
+                        ContentValues contentvalues = new ContentValues();
+                        contentvalues.put(KEY_FIELD, "key" +inputvalues[1] );
+                        contentvalues.put(VALUE_FIELD, "val" + inputvalues[2]);
+                        insert(mUri, contentvalues);
+
+                    }//for chord protocol of delete
+                    else if(inputvalues[0].equals("delete")){
+                        Log.v(TAG, "ServerTask Delete:"+inputvalues[1]);
+                        delete(mUri,inputvalues[1],null);
+
+                    }
+                    else if(inputvalues[0].equals("query")){
+
+
+                    }
+                    else if(inputvalues[0].equals("AckNodeJoinPred")){
+                    // message="Ack_NodeJoinPred"+"_"+NodeId+"_"+myPort;
+                        successorId=inputvalues[1];
+                        successorPort=Integer.parseInt(inputvalues[2]);
+                        String logmsg="AckNodeJoinPred "+"succId:"+successorId+"succPort:"+successorPort;
+                        Log.v(TAG, logmsg);
+                    }
+                    else if(inputvalues[0].equals("AckNodeJoinSucc")) {
+                        predecesssorId=inputvalues[1];
+                        predecesssorPort=Integer.parseInt(inputvalues[2]);
+                        if (successorPort==-1) {
+                          successorId=inputvalues[1];
+                          successorPort=Integer.parseInt(inputvalues[2]);
+
+                        }
+                        String logmsg="Ack_NodeJoinSucc "+"succId:"+successorId+"succPort:"+successorPort+"predId:"+predecesssorId+"predPort:"+predecesssorPort;
+                        Log.v(TAG, logmsg);
+                        String output=IDSpaceRePartition();
+                        out.println(output);
+                        Log.v(TAG, output);
+
+                    }
+                    else{
+
+                        Log.v(TAG, "didn't match!");
+                    }
+
+
+                } catch (IOException e) {
+                    Log.e(TAG, "ServerTask IOException");
+
+                }
+
+            }
+
+        }
+
+        protected void onProgressUpdate(String...strings) {
+
+
+        }
+
+
+    }
+    private String IDSpaceRePartition()
+    {
+        String output="";
+        Cursor res=dbHelper.getMessage(predecesssorId);
+        if(res.moveToFirst()){
+            do{
+                String var1 = res.getString(res.getColumnIndex("KEY_FIELD"));
+                String var2 = res.getString(res.getColumnIndex("VALUE_FIELD"));
+                output=output+"_"+var1+"_"+var2+"_";
+
+            }while (res.moveToNext());
+        }
+        res.close();
+        int succ=dbHelper.DeleteMessagePartition(predecesssorId);
+        return output;
+
+
+
+
+    }
+
+    private void NodeJoinRequest(){
+        //hash a port and pass it along the ring and let nodeid respond with successor and predecessor.
+        //what kind of communication we will have? duplex?? will the socket wait till it gets response on
+        //same socket??
+        //ID Partitioning! Should loop over all files and find keys and send it to the new node
+        //and delete it from own space
+        //first find its nodeid
+
+        if (portStr.equals("5554") ) {
+            //Do nothing,set successor and predecessor as null
+            successorId="null";
+            successorPort=-1;
+            predecesssorId="null";
+            predecesssorPort=-1;
+            Log.v(TAG,"Set successors and predecessors for 5554");
+
+        }
+        else {
+            //ping 5554,let 5554 ping pass along its nodeid in a chord to find out its successor and predecessor
+            //Assuming that there is no way to know which avd is 5554, it will multicast to all ports,check if the
+            //assumption is right or not
+            Log.v(TAG,"Setting successor and predecessor for other nodes");
+            try {
+                Log.v(TAG,"Sending join request to 5554");
+                String ping = "ping" + "_" + portStr + "_" + NodeId;
+                new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,ping,"ping");
+                 //ID partitioning
+
+            }catch (Exception e) {
+                Log.e(TAG,e.toString());
+            }
+
+
+        }
+
+    }
+
+    private String NodeJoinHandler(boolean IsOriginator,String message,PrintWriter socketout){
+
+        //Write a chord protocol which forwards around the ring if originator and checks the nodeid and
+        //returns successor and predecessor and messages to be inserted
+        String[] inputvalues=message.split("_");
+        Log.v(TAG,"Entered NodeJoinHandler()");
+        try{
+        if(IsOriginator){
+            //String nodejoin="nodejoin"+"_"+successorPort+"_"+NodeId;
+            String nodejoin="nodejoin"+"_"+inputvalues[1]+"_"+inputvalues[2];
+            Log.v(TAG,"Node Join request:"+nodejoin);
+            String output="";
+            //forwarding request to the successor node if there is successor
+            if (successorPort!=-1) {
+                Log.v(TAG, "Valid successor port case");
+                Log.v(TAG,"KEY is"+inputvalues[2]);
+                Log.v(TAG,"NodeId is"+NodeId);
+                Log.v(TAG,"PredId is"+predecesssorId);
+                if (inputvalues[2].compareTo(NodeId)<= 0){ Log.v(TAG,"key is smaller than nodeId");}
+                if (inputvalues[2].compareTo(predecesssorId)>0){ Log.v(TAG,"key is greater than predId");}
+                if (NodeId.compareTo(predecesssorId)< 0){ Log.v(TAG,"nodeid is smaller than predId");}
+                if  (inputvalues[2].compareTo(predecesssorId)>0){Log.v(TAG,"key greater than predId");}
+                if  (inputvalues[2].compareTo(NodeId)<0){Log.v(TAG,"key less than NodeId");}
+                if ( ((inputvalues[2].compareTo(NodeId)<= 0) && (inputvalues[2].compareTo(predecesssorId)>0)) ||
+                        ((NodeId.compareTo(predecesssorId)< 0) &&  ( (inputvalues[2].compareTo(predecesssorId)>0)||(inputvalues[2].compareTo(NodeId)<0) ) ) ) {
+                        output = NodeId + "_" + myPort + "_" + predecesssorId + "_" + predecesssorPort + "_" + successorId + "_" + successorPort;
+                        //socketout.println(output);
+                        String logmsg = "Response sent by matched Node which is also first node is" + output;
+                        Log.v(TAG, logmsg);
+                        return output;
+
+                }
+                Socket socketnext = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), successorPort);
+                BufferedReader in = new BufferedReader(new InputStreamReader(socketnext.getInputStream()));
+                PrintWriter out = new PrintWriter(socketnext.getOutputStream(), true);
+                out.println(nodejoin);
+                output = in.readLine();
+                Log.v(TAG, "Response received at originator: " + output);
+                socketnext.close();
+                //returning response received at originator
+
+            }else{
+
+                output=NodeId+"_"+myPort+"_"+predecesssorId+"_"+predecesssorPort+"_"+successorId+"_"+successorPort;
+                    //put special values to identify this special condition---
+                Log.v(TAG, "Entered condition where joining node should be predecessor and successor of 5554 i.e. chord ring has two members now");
+                //Also handle a case when hash is greater than all nodes in the ring
+
+            }
+            return output;
+
+        }
+        else {
+            //check if nodeid>predessorId and nodeid<myid then return mysuccessorid and predecessorsid;and delete its
+            //own predecessor , if sending ack is successful then only modify own data.
+            String output=LookUpFunction(inputvalues[2],message,"nodejoin",socketout);
+            //Let this function also send ID space
+            return output;
+
+        }} catch (Exception e)
+        {
+            Log.e(TAG,Log.getStackTraceString(e));
+            return "1_21_34_12_21_21";
+        }
+        //return null;
+
+
+
+    }
+
+    private String LookUpFunction(String key,String message,String request,PrintWriter socketout)
+    {
+        try{
+            Log.v(TAG,"KEY is"+key);
+            Log.v(TAG,"NodeId is"+NodeId);
+            Log.v(TAG,"PredId is"+predecesssorId);
+            if (key.compareTo(NodeId)<= 0){ Log.v(TAG,"key is smaller than nodeId");}
+            if (key.compareTo(predecesssorId)>0){ Log.v(TAG,"key is greater than predId");}
+            if (NodeId.compareTo(predecesssorId)< 0){ Log.v(TAG,"nodeid is smaller than predId");}
+            if  (key.compareTo(predecesssorId)>0){Log.v(TAG,"key greater than predId");}
+            if  (key.compareTo(NodeId)<0){Log.v(TAG,"key less than NodeId");}
+            if ( ((key.compareTo(NodeId)<= 0) && (key.compareTo(predecesssorId)>0)) ||
+                    ((NodeId.compareTo(predecesssorId)< 0) &&  ( (key.compareTo(predecesssorId)>0)||(key.compareTo(NodeId)<0) ) ) ) {
+                    if (request.equals("nodejoin")) {
+                    String output = NodeId + "_" + myPort + "_" + predecesssorId + "_" + predecesssorPort + "_" + successorId + "_" + successorPort;
+                    socketout.println(output);
+                    String logmsg = "Response sent by matched Node back to the successor is" + output;
+                    Log.v(TAG, logmsg);
+                    return output;
+                }
+
+            }else{
+
+                Socket socketnext=new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), successorPort);
+                BufferedReader in = new BufferedReader(new InputStreamReader(socketnext.getInputStream()));
+                PrintWriter out = new PrintWriter(socketnext.getOutputStream(),true);
+                out.println(message);
+                String logmsg="Request sent by node to successor: "+message;
+                Log.v(TAG, logmsg);
+                String output =in.readLine();
+                logmsg="Response received by successor to the Node is: "+output;
+                Log.v(TAG,logmsg);
+                socketout.println(output);
+                socketnext.close();
+                return output;
+            }
+
+        } catch (Exception e) {
+            Log.e(TAG,Log.getStackTraceString(e));
+        }
+
+        return null;
+
+
+
+
+    }
+
+    private class ClientTask extends AsyncTask<String,Void,Void>{
+
+        @Override
+        protected Void doInBackground(String... msgs ){
+
+        try{
+            //for message type ping only--different for message type insert,delete and query
+            if  (msgs[1].equals("ping")) {
+                Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), 11108);
+                PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+                BufferedReader in=new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                Log.v(TAG, msgs[0]);
+                out.println(msgs[0]);
+                Log.v(TAG, "Listening from a socket");
+                String output=in.readLine();
+                Log.v(TAG, output);
+                Log.v(TAG, "ClientTask case1:Ping");
+                ProcessNodeJoinOutput(output);
+                in.close();
+                out.close();
+
+            }
+            else {
+                Log.v(TAG, "ClientTask case2:Insert,Delete,Query");
+                Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), successorPort);
+                PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+                BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                Log.v(TAG, msgs[0]);
+                out.println(msgs[0]);
+                in.close();
+                out.close();
+                socket.close();
+            }
+
+
+        }catch (NullPointerException e){
+            Log.e(TAG,Log.getStackTraceString(e));
+        } catch (Exception e){
+            Log.e(TAG,e.toString());
+        }
+
+        return null;
+
+
+    }
+
+}
+
+    private void ProcessNodeJoinOutput(String input){
+        Log.v(TAG,"Entered ProcessNodeJoinOutput"+" "+input);
+        //NodeId+"_"+myPort+"_"+predecesssorId+"_"+predecesssorPort+"_"+successorId+"_"+successorPort;
+        String[] values=input.split("_");
+        String nodeid=values[0];
+        String nodeport=values[1];
+        String predecesssorid=values[2];
+        String predecesssorport=values[3];
+        //Whatever nodeid we have got,it should be successor of joining node,its predecessor should be predessor of
+        //joining node, and tell that node to change its predecessor node
+        successorId=nodeid;
+        successorPort=Integer.parseInt(nodeport);
+        if (Integer.parseInt(predecesssorport)==-1)
+        {
+            predecesssorId=nodeid;
+            predecesssorPort=Integer.parseInt(nodeport);
+            Log.v(TAG,"Setting prdecessor in case of only 2 nodes in the ring");
+        }
+        else {
+            predecesssorId = predecesssorid;
+            predecesssorPort = Integer.parseInt(predecesssorport);
+            Log.v(TAG,"Setting prdecessor in case there are more than two nodes in the ring");
+        }
+        String logmsg="Setting successorId:"+successorId+" successorPort:"+successorPort+" predecesssorId"+predecesssorId+" predecesssorPort:"+
+                predecesssorPort;
+        Log.v(TAG,logmsg);
+        try{
+            //insert all ID space in own space
+            //sending message to successor to change pred
+            //TBD
+            String IDspace="";
+            boolean success=processIDspace(IDspace);
+            if (true) {
+                Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(nodeport));
+                String message = "AckNodeJoinSucc" + "_" + NodeId + "_" + myPort;
+                PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+                BufferedReader in=new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                out.println(message);
+                Log.v(TAG, message);
+                IDspace=in.readLine();
+                processIDspace(IDspace);
+                //sending message to predecessor to change succ
+                if (Integer.parseInt(predecesssorport)!=-1){
+                socket=new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),Integer.parseInt(predecesssorport));
+                out=new PrintWriter(socket.getOutputStream(),true);
+                message="AckNodeJoinPred"+"_"+NodeId+"_"+myPort;
+                out.println(message);
+                Log.v(TAG, message);
+                }
+
+                socket.close();
+            }
+
+
+
+        }catch (Exception e){
+
+            Log.e(TAG,Log.getStackTraceString(e));
+        }
+
+        //pings the node, gets the id space from the node,inserts the ID space in own space, sets predecessor and successor,
+        //sends Ack to the node, and then node deletes its ID space and modifies its successor and predecessor.
+
+    }
+
+
+    private void ProcessQuery(String input){
+
+
+    }
+
+
+
+    private boolean processIDspace(String input){
+      Log.v(TAG,"Entered processIDspace");
+        Log.v(TAG,input);
+
+      String[] inputvalues=input.split("_");
+        Log.v(TAG,Integer.toString(inputvalues.length));
+      int i=0;
+        Log.v(TAG,"START while");
+        while (i<inputvalues.length)
+        {
+            Log.v(TAG,inputvalues[i]);
+            i++;
+        }
+        Log.v(TAG,"END while");
+      while (i<inputvalues.length)
+      {
+          ContentValues contentvalues = new ContentValues();
+          contentvalues.put(KEY_FIELD, "key" +inputvalues[i] );
+          contentvalues.put(VALUE_FIELD, "val" + inputvalues[i+1]);
+          insert(mUri, contentvalues);
+          i=i+2;
+      }
+      return false;
+    }
+
+    private Uri buildUri(String scheme, String authority) {
+        Uri.Builder uriBuilder = new Uri.Builder();
+        uriBuilder.authority(authority);
+        uriBuilder.scheme(scheme);
+        return uriBuilder.build();
+    }
+
+
+}
